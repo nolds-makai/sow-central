@@ -1,0 +1,153 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ───────── Auth.js v5 (PrismaAdapter) ─────────
+
+model User {
+  id            String              @id @default(cuid())
+  name          String?
+  email         String              @unique
+  emailVerified DateTime?
+  image         String?
+  accounts      Account[]
+  sessions      Session[]
+  uploadedSows  Sow[]               @relation("UploadedBy")
+  toggles       DeliverableToggle[]
+}
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+  user              User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+// ───────── SOW domain ─────────
+
+model Sow {
+  id                   String       @id @default(cuid())
+  title                String
+  clientName           String?
+  engagementName       String?
+  startDate            DateTime?
+  endDate              DateTime?
+  totalValue           String?
+  currency             String?
+  parties              String[]     @default([])
+  contractNumber       String?
+  effectiveDate        DateTime?
+  signedDate           DateTime?
+  primaryContactClient String?
+  primaryContactMakai  String?
+  paymentTerms         String?
+  summary              String?
+
+  pdfFilename          String
+  pdfPath              String
+
+  uploadedBy           User?        @relation("UploadedBy", fields: [uploadedById], references: [id])
+  uploadedById         String?
+
+  createdAt            DateTime     @default(now())
+  updatedAt            DateTime     @updatedAt
+
+  workstreams          Workstream[]
+
+  @@index([createdAt])
+}
+
+model Workstream {
+  id           String  @id @default(cuid())
+  sow          Sow     @relation(fields: [sowId], references: [id], onDelete: Cascade)
+  sowId        String
+  name         String
+  description  String?
+  order        Int     @default(0)
+  phases       Phase[]
+
+  @@index([sowId, order])
+}
+
+model Phase {
+  id            String        @id @default(cuid())
+  workstream    Workstream    @relation(fields: [workstreamId], references: [id], onDelete: Cascade)
+  workstreamId  String
+  name          String
+  description   String?
+  startDate     DateTime?
+  endDate       DateTime?
+  order         Int           @default(0)
+  deliverables  Deliverable[]
+
+  @@index([workstreamId, order])
+}
+
+model Deliverable {
+  id                 String              @id @default(cuid())
+  phase              Phase               @relation(fields: [phaseId], references: [id], onDelete: Cascade)
+  phaseId            String
+  title              String
+  description        String?
+  acceptanceCriteria String?
+  dueDate            DateTime?
+  order              Int                 @default(0)
+
+  // Current state — denormalized for fast reads
+  completed          Boolean             @default(false)
+  completedAt        DateTime?
+  completedById      String?
+
+  // Audit trail of every toggle (who/when/to-what)
+  toggles            DeliverableToggle[]
+
+  // Self-referential M2M for cross-deliverable dependencies
+  dependsOn          Deliverable[]       @relation("DeliverableDeps")
+  dependedOnBy       Deliverable[]       @relation("DeliverableDeps")
+
+  @@index([phaseId, order])
+}
+
+model DeliverableToggle {
+  id            String      @id @default(cuid())
+  deliverable   Deliverable @relation(fields: [deliverableId], references: [id], onDelete: Cascade)
+  deliverableId String
+  user          User        @relation(fields: [userId], references: [id])
+  userId        String
+  completed     Boolean
+  createdAt     DateTime    @default(now())
+
+  @@index([deliverableId, createdAt])
+}
