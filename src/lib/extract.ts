@@ -5,6 +5,7 @@ const MODEL = process.env.ANTHROPIC_MODEL || "claude-opus-4-7";
 
 const anthropic = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY,
+  maxRetries: 5,
 });
 
 // ───────── Schema ─────────
