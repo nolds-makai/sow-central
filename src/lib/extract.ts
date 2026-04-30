@@ -64,9 +64,15 @@ export const SowExtractionSchema = z.object({
 
 export type SowExtraction = z.infer<typeof SowExtractionSchema>;
 
-// ───────── JSON Schema (sent to the model) ─────────
+// ───────── JSON Schema (kept for prompt documentation; not sent to API) ─────────
+//
+// We previously passed this via output_config.format. Anthropic's grammar
+// compilation service has had outage windows that block first-time schema
+// compilation, so we now describe the shape in the prompt and validate the
+// model's JSON output with Zod. Keeping the JSON schema constant around so
+// it's easy to flip back if/when the service stabilizes.
 
-const JSON_SCHEMA = {
+const JSON_SCHEMA_UNUSED = {
   type: "object",
   additionalProperties: false,
   properties: {
@@ -153,20 +159,56 @@ const JSON_SCHEMA = {
 
 const SYSTEM_PROMPT = `You are extracting structured engagement data from a Statement of Work (SOW) PDF for an internal Makai Labs tool.
 
-Extract the SOW into this hierarchy:
-- engagement metadata (client, dates, value, contacts, etc.)
-- workstreams (top-level domains of work)
-  - phases (chronological or logical groupings within a workstream)
-    - deliverables (concrete, checkable artifacts)
+Output a SINGLE JSON object matching this exact TypeScript type. No prose, no markdown fences, no commentary — only the JSON object.
+
+type Output = {
+  metadata: {
+    title: string;
+    client_name?: string;
+    engagement_name?: string;
+    start_date?: string;        // ISO 8601 (YYYY-MM-DD)
+    end_date?: string;
+    total_value?: string;       // exact text e.g. "$250,000", "NTE $1.2M"
+    currency?: string;          // ISO code e.g. "USD"
+    parties: string[];          // named legal entities beyond client and Makai; [] if none
+    contract_number?: string;
+    effective_date?: string;    // ISO 8601
+    signed_date?: string;       // ISO 8601
+    primary_contact_client?: string;
+    primary_contact_makai?: string;
+    payment_terms?: string;     // free-form summary
+    summary?: string;           // 1-2 sentences
+  };
+  workstreams: Array<{
+    name: string;
+    description?: string;
+    phases: Array<{
+      name: string;
+      description?: string;
+      start_date?: string;      // ISO 8601
+      end_date?: string;
+      deliverables: Array<{
+        external_id: string;    // stable short ID like "D1", "D2", numbered sequentially across the entire SOW
+        title: string;
+        description?: string;
+        acceptance_criteria?: string;
+        due_date?: string;      // ISO 8601
+        depends_on: string[];   // external_ids of other deliverables this depends on (any workstream); [] if none
+      }>;
+    }>;
+  }>;
+};
 
 Rules:
-- Assign every deliverable a stable short external_id (D1, D2, D3, ...) numbered sequentially across the entire SOW. Use these IDs in depends_on arrays to capture cross-deliverable dependencies, including across workstreams.
-- For dates, output ISO 8601 (YYYY-MM-DD) when an exact date is given. If only a relative timeline is given (e.g. "Week 4"), omit the date field entirely.
-- If a field is not present in the SOW, omit it from the output (or use [] for empty arrays). Do not invent values.
+- Assign every deliverable a stable short external_id ("D1", "D2", "D3", ...) numbered sequentially across the entire SOW. Use these IDs in depends_on to capture cross-deliverable dependencies, including across workstreams.
+- For dates, use ISO 8601 (YYYY-MM-DD) when an exact date is given. If only a relative timeline is given (e.g. "Week 4"), omit the date field entirely.
+- If an optional field is not present in the SOW, omit it from the output. Do not invent values. Use [] for empty arrays.
 - Preserve the SOW's own language for titles and acceptance criteria — do not rephrase.
 - If the SOW lacks an explicit workstream/phase split, infer the most natural grouping from headings and section structure rather than dumping everything into one bucket.
-- total_value: capture exactly as written (e.g. "$250,000", "Not to exceed $1.2M").
-- parties: include only named legal entities beyond client and Makai (subcontractors, partners). Empty array if none.`;
+- total_value: capture exactly as written.
+- parties: include only named legal entities beyond client and Makai (subcontractors, partners). Empty array if none.
+
+Output the JSON object directly. The very first character of your response must be \`{\` and the very last character must be \`}\`.`;
 
 // ───────── Public API ─────────
 
@@ -177,10 +219,7 @@ export async function extractSow(pdfBytes: Buffer): Promise<SowExtraction> {
     model: MODEL,
     max_tokens: 32000,
     thinking: { type: "adaptive" },
-    output_config: {
-      format: { type: "json_schema", schema: JSON_SCHEMA },
-      effort: "high",
-    },
+    output_config: { effort: "high" },
     system: SYSTEM_PROMPT,
     messages: [
       {
@@ -196,7 +235,7 @@ export async function extractSow(pdfBytes: Buffer): Promise<SowExtraction> {
           },
           {
             type: "text",
-            text: "Extract the SOW into the structured schema. Return only the JSON — no commentary.",
+            text: "Extract the SOW into the JSON shape defined in the system prompt. Return only the JSON object.",
           },
         ],
       },
@@ -209,12 +248,21 @@ export async function extractSow(pdfBytes: Buffer): Promise<SowExtraction> {
     throw new Error("Anthropic returned no text content for SOW extraction");
   }
 
+  // Strip any stray markdown fences or commentary the model may add.
+  const raw = textBlock.text.trim();
+  const start = raw.indexOf("{");
+  const end = raw.lastIndexOf("}");
+  if (start === -1 || end === -1 || end <= start) {
+    throw new Error(`SOW extraction output had no JSON object\n--- output ---\n${raw.slice(0, 2000)}`);
+  }
+  const jsonText = raw.slice(start, end + 1);
+
   let parsed: unknown;
   try {
-    parsed = JSON.parse(textBlock.text);
+    parsed = JSON.parse(jsonText);
   } catch (err) {
     throw new Error(
-      `SOW extraction returned non-JSON output: ${(err as Error).message}\n--- output ---\n${textBlock.text.slice(0, 2000)}`,
+      `SOW extraction returned invalid JSON: ${(err as Error).message}\n--- output ---\n${jsonText.slice(0, 2000)}`,
     );
   }
 
