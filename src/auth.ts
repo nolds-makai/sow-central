@@ -14,7 +14,19 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
       return token;
     },
     async session({ session, token }) {
-      if (token?.id && session.user) {
+      // Reconcile against the current DB by email so stale JWTs (e.g. from a
+      // prior DB) don't strand the session with a non-existent user id.
+      if (session.user && token?.email) {
+        const dbUser = await prisma.user.findUnique({
+          where: { email: token.email },
+          select: { id: true },
+        });
+        if (dbUser) {
+          session.user.id = dbUser.id;
+        } else if (token.id) {
+          session.user.id = token.id as string;
+        }
+      } else if (token?.id && session.user) {
         session.user.id = token.id as string;
       }
       return session;
